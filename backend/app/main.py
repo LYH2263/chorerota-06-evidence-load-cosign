@@ -1,10 +1,10 @@
-import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from app import seed
 from app.db import connect
-from app.engines.rota import build_week_slots, swap_legal, apply_swap
+from app.engines.rota import build_week_slots, swap_legal
+from app.modules import chore_photo, swap_confirm, swap_views
 
 app = FastAPI(title="Chorerota", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -44,16 +44,10 @@ def list_weeks():
 @app.get("/api/weeks/{week_id}/board")
 def week_board(week_id: int):
     c = connect()
-    week = c.execute("SELECT * FROM weeks WHERE id=?", (week_id,)).fetchone()
-    if not week: c.close(); raise HTTPException(404, "week not found")
-    assigns = [dict(r) for r in c.execute("SELECT * FROM assignments WHERE week_id=?", (week_id,))]
-    members = {r["id"]: r["name"] for r in c.execute("SELECT id,name FROM members")}
-    tasks = {r["id"]: r["title"] for r in c.execute("SELECT id,title FROM tasks")}
+    payload = swap_views.board_with_pins(c, week_id)
     c.close()
-    for a in assigns:
-        a["member_name"] = members.get(a["member_id"], "?")
-        a["task_title"] = tasks.get(a["task_id"], "?")
-    return {"week": dict(week), "assignments": assigns}
+    if payload is None: raise HTTPException(404, "week not found")
+    return payload
 
 class GenBody(BaseModel):
     days: int = 7
@@ -92,27 +86,69 @@ def request_swap(week_id: int, body: SwapBody):
 
 @app.get("/api/swaps")
 def list_swaps():
-    c = connect(); rows = [dict(r) for r in c.execute("SELECT * FROM swap_requests ORDER BY id DESC")]; c.close(); return rows
+    c = connect(); rows = swap_views.list_swaps(c); c.close(); return rows
+
+@app.get("/api/swaps/{swap_id}")
+def swap_detail(swap_id: int):
+    c = connect()
+    detail = swap_views.swap_detail(c, swap_id)
+    c.close()
+    if detail is None: raise HTTPException(404, "swap not found")
+    return detail
+
+def _swap_http_error(code: str) -> HTTPException:
+    return HTTPException(404 if code == "swap_not_found" else 400, code)
+
+class ConfirmBody(BaseModel):
+    evidence_a: str = ""
+    evidence_b: str = ""
 
 @app.post("/api/swaps/{swap_id}/confirm")
-def confirm_swap(swap_id: int):
+def confirm_swap(swap_id: int, body: ConfirmBody = ConfirmBody()):
+    """确认时强制带证：两格留证内容缺一即 400，单保持 pending。"""
+    c = connect()
+    try:
+        swap_confirm.confirm(c, swap_id, body.evidence_a, body.evidence_b)
+        c.commit()
+    except swap_confirm.SwapError as e:
+        c.rollback(); c.close(); raise _swap_http_error(str(e))
+    detail = swap_views.swap_detail(c, swap_id)
+    c.close(); return detail
+
+@app.post("/api/swaps/{swap_id}/cancel")
+def cancel_swap(swap_id: int):
+    """撤销：回滚两格成员、级联作废留证、负荷差展示随 status=void 下线。"""
+    c = connect()
+    try:
+        swap_confirm.cancel(c, swap_id)
+        c.commit()
+    except swap_confirm.SwapError as e:
+        c.rollback(); c.close(); raise _swap_http_error(str(e))
+    detail = swap_views.swap_detail(c, swap_id)
+    c.close(); return detail
+
+class EvidenceBody(BaseModel):
+    cell: str  # "a" | "b"
+    note: str = ""
+
+@app.post("/api/swaps/{swap_id}/evidence")
+def attach_evidence(swap_id: int, body: EvidenceBody):
+    """补证：仅 confirmed 单可挂；pending/void 强行挂证 400 且留证表不增行。"""
     c = connect()
     sw = c.execute("SELECT * FROM swap_requests WHERE id=?", (swap_id,)).fetchone()
-    if not sw: c.close(); raise HTTPException(404, "swap not found")
-    if sw["status"] != "pending":
-        c.close(); raise HTTPException(400, "not_pending")
-    assigns = [dict(r) for r in c.execute(
-        "SELECT id,day,task_id,member_id FROM assignments WHERE week_id=?", (sw["week_id"],))]
-    slots = [{"day": a["day"], "task_id": a["task_id"], "member_id": a["member_id"]} for a in assigns]
+    if sw is None: c.close(); raise HTTPException(404, "swap not found")
+    if body.cell not in ("a", "b"): c.close(); raise HTTPException(400, "bad_cell")
+    day, task = (sw["a_day"], sw["a_task"]) if body.cell == "a" else (sw["b_day"], sw["b_task"])
+    member = c.execute(
+        "SELECT member_id FROM assignments WHERE week_id=? AND day=? AND task_id=?",
+        (sw["week_id"], day, task)).fetchone()
     try:
-        new_slots = apply_swap(slots, sw["a_day"], sw["a_task"], sw["b_day"], sw["b_task"])
-    except ValueError as e:
-        c.close(); raise HTTPException(400, str(e))
-    for a, s in zip(assigns, new_slots):
-        c.execute("UPDATE assignments SET member_id=? WHERE id=?", (s["member_id"], a["id"]))
-    c.execute("UPDATE swap_requests SET status='confirmed' WHERE id=?", (swap_id,))
-    c.commit(); c.close()
-    return {"ok": True, "swap_id": swap_id}
+        eid = chore_photo.attach_for_swap(
+            c, sw, day, task, member["member_id"] if member else None, body.note.strip(), kind="manual")
+        c.commit()
+    except chore_photo.EvidenceRejected as e:
+        c.rollback(); c.close(); raise HTTPException(400, str(e))
+    c.close(); return {"id": eid, "status": "active"}
 
 @app.get("/api/settings")
 def get_settings():

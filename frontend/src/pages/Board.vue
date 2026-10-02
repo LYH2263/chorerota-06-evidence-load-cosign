@@ -10,9 +10,12 @@
     <div class="week-grid">
       <article v-for="d in days" :key="d" class="week-card">
         <header>Day {{ d }}</header>
-        <div v-for="a in byDay(d)" :key="a.id">
+        <div v-for="a in byDay(d)" :key="a.id" class="cell">
           <span class="chip">{{ a.task_title }}</span>
           <span class="chip coral">{{ a.member_name }}</span>
+          <p v-if="a.swap_pin" class="pin">
+            ⇄ {{ a.swap_pin.load_summary }} · 留证×{{ a.swap_pin.evidence }}
+          </p>
         </div>
         <p v-if="!byDay(d).length" class="muted">空</p>
       </article>
