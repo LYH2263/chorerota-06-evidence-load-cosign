@@ -1,7 +1,7 @@
 <template>
   <div>
     <h1 class="brand">本周看板</h1>
-    <p class="muted">周卡片网格 · round-robin 落位后可去「对调」申请交换</p>
+    <p class="muted">周卡片网格 · round-robin 落位后可去「对调」申请交换 · 已确认对调的格子钉负荷差与留证数</p>
     <div style="display:flex;gap:8px;margin:12px 0">
       <button @click="generate">生成周表</button>
       <button class="ghost" @click="load">刷新</button>
@@ -13,6 +13,8 @@
         <div v-for="a in byDay(d)" :key="a.id">
           <span class="chip">{{ a.task_title }}</span>
           <span class="chip coral">{{ a.member_name }}</span>
+          <span v-if="a.load_diff !== null && a.load_diff !== undefined" class="chip">负荷差 {{ a.load_diff }}</span>
+          <span v-if="a.evidence_count" class="chip">留证×{{ a.evidence_count }}</span>
         </div>
         <p v-if="!byDay(d).length" class="muted">空</p>
       </article>

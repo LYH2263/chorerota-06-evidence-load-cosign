@@ -1,4 +1,5 @@
 from app.db import connect
+from app.modules import evidence, load_snapshot
 
 def init_db():
     c = connect()
@@ -10,6 +11,8 @@ def init_db():
     CREATE TABLE IF NOT EXISTS swap_requests(id INTEGER PRIMARY KEY AUTOINCREMENT, week_id INT, a_day INT, a_task INT, b_day INT, b_task INT, status TEXT, note TEXT);
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     """)
+    evidence.init(c)
+    load_snapshot.init(c)
     if c.execute("SELECT COUNT(*) c FROM members").fetchone()["c"] == 0:
         c.executemany("INSERT INTO members(name,active,data_quality) VALUES (?,?,?)", [
             ("阿明", 1, "clean"), ("小雨", 1, "clean"), ("爷爷", 1, "clean"),
